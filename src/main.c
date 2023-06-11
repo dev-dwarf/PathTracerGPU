@@ -20,21 +20,43 @@
 typedef HMM_Vec3 vec3;
 
 #include <stdlib.h>
-#pragma comment(lib,"user32.lib") 
+#pragma comment(lib,"user32.lib")
 
+LPCWSTR CS_FILE = L"..\\src\\shader.hlsl";
+#define CS_ENTRYPOINT "CSMain"
+#define CS_FEATURE_LEVEL "cs_5_0"
+#define CS_COMPILE_FLAGS (D3DCOMPILE_DEBUG | D3DCOMPILE_IEEE_STRICTNESS)
+#define CS_NUM_THREADS_W 16
+#define CS_NUM_THREADS_H 8
+/* NOTE(lcf): Calculate number of threads to cover the dimension, rounding up
+   instead of down by adding the divisor -1. */
+#define CS_DISPATCH_COUNT(x,n) ((x+n-1)/n)
 
-static void SetupRender(void);
+struct CS_Constants {
+    f32 iTime;
+    f32 RenderWidth;
+    f32 RenderHeight;
+    /* NOTE(lcf): sizeof() must be a multiple of 16 due to buffer config. */
+    u8 pad[4]; 
+};
 
 global HWND Window;
-global ID3D11Device1* Device;
-global ID3D11DeviceContext1* DeviceContext;
+global ID3D11Device1 *Device;
+global ID3D11DeviceContext1 *DeviceContext;
 global IDXGISwapChain1 *SwapChain;
 global b32 DoNotWaitForVsync;
 
 global DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
 global ID3D11RenderTargetView *FrameBufferView;
-global ID3D11DepthStencilView* DepthBufferView;
+global ID3D11DepthStencilView *DepthStencilView;
+global ID3D11UnorderedAccessView *FrameBufferUAV;
 global D3D11_VIEWPORT AppViewport;
+
+global b32 SwapChainExists;
+global s32 RenderWidth;
+global s32 RenderHeight;
+static void TeardownSwapChain(void);
+static void SetupSwapChain(void);
 
 global b32 Quit;
 
@@ -55,7 +77,7 @@ LRESULT WINAPI CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     } break;
     case WM_CLOSE: {
         Quit = true;
-        /* TODO: let game know that user is trying to quit somehow? */
+        /* TODO: let app know that user is trying to quit somehow? */
     } break;
     case WM_SIZE: {
     } break;
@@ -66,11 +88,17 @@ LRESULT WINAPI CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     return Result;
 }
 
+global u32 presentationFlags = 0;
 int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, int cmdshow) {
     (void) hinstance, previnstance, cmdline, cmdshow;
 
     os_Init();
     Arena *arena = Arena_create();
+
+    /* Configuration */
+    if (DoNotWaitForVsync) {
+        presentationFlags |= DXGI_PRESENT_DO_NOT_WAIT;
+    }
 
     { /* Receive a message from ourself to make window active. */
         PostQuitMessage(0);
@@ -100,9 +128,40 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
     }
 
     /* Setup Render Target */
-    SetupRender();
+    SetupSwapChain();
+
+    /* Compile Shader and Set up needed buffers*/
+    ID3D11ComputeShader *Shader = 0;
+    {
+        ID3DBlob *csblob = 0;
+        ID3DBlob *errblob = 0;
+        HRESULT hr = D3DCompileFromFile(CS_FILE, 0, 0, CS_ENTRYPOINT, CS_FEATURE_LEVEL, 1 << 15, 0, &csblob, &errblob);
+        if (!SUCCEEDED(hr)) {
+            if (errblob) {
+                OutputDebugStringA((ch8*) errblob->lpVtbl->GetBufferPointer(errblob));
+            }
+        }
+        
+            HR(Device->lpVtbl->CreateComputeShader(Device, csblob->lpVtbl->GetBufferPointer(csblob), csblob->lpVtbl->GetBufferSize(csblob), 0, &Shader));
+        
+        SAFE_RELEASE(csblob);
+        SAFE_RELEASE(errblob);
+    }
+    ID3D11Buffer *ConstantsBuffer;
+    {
+        D3D11_BUFFER_DESC constantsDesc = {
+            sizeof(struct CS_Constants),
+            D3D11_USAGE_DYNAMIC,
+            D3D11_BIND_CONSTANT_BUFFER,
+            D3D11_CPU_ACCESS_WRITE,
+            0, /* No misc flags */
+            0 /* Not a structured buffer so stride not needed. */
+        };
+        Device->lpVtbl->CreateBuffer(Device, &constantsDesc, 0, &ConstantsBuffer);
+    }
 
     /* Message Loop */
+    s64 startTime = os_GetTimeMicroseconds();
     s64 flipTime = 0;
     s64 lastFlipTime = 0;
     while (!Quit) {
@@ -133,33 +192,46 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
             DispatchMessageA(&msg);
         }
 
-        SetupRender();
-        
-        u32 flags = 0;
-        if (DoNotWaitForVsync) {
-            flags |= DXGI_PRESENT_DO_NOT_WAIT;
+        /* Rebuild SwapChain and Device if needed. */
+        SetupSwapChain();
+
+        /* Update Shader Constants */
+        {
+            struct CS_Constants frameConstants;
+            frameConstants.iTime = (flipTime - startTime)  * 0.000001f;
+            frameConstants.RenderWidth = (f32) RenderWidth;
+            frameConstants.RenderHeight = (f32) RenderHeight;
+
+            D3D11_MAPPED_SUBRESOURCE resource;	
+            DeviceContext->lpVtbl->Map(DeviceContext, (ID3D11Resource*) ConstantsBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &resource);
+            memcpy(resource.pData, &frameConstants, sizeof(frameConstants));
+            DeviceContext->lpVtbl->Unmap(DeviceContext, (ID3D11Resource*) ConstantsBuffer, 0);
         }
-        SwapChain->lpVtbl->Present(SwapChain, true, flags);
+        
+        /* Rendering */
+        DeviceContext->lpVtbl->CSSetShader(DeviceContext, Shader, 0, 0);
+        DeviceContext->lpVtbl->CSSetUnorderedAccessViews(DeviceContext, 0, 1, &FrameBufferUAV, 0);
+        DeviceContext->lpVtbl->CSSetConstantBuffers(DeviceContext, 0, 1, &ConstantsBuffer);
+        DeviceContext->lpVtbl->Dispatch(DeviceContext, CS_DISPATCH_COUNT(RenderWidth, CS_NUM_THREADS_W), CS_DISPATCH_COUNT(RenderHeight, CS_NUM_THREADS_H), 1);
+        
+        SwapChain->lpVtbl->Present(SwapChain, 0, presentationFlags);
     }
     
     /* Free Swap Chain */
+    TeardownSwapChain();
+    SAFE_RELEASE(Shader);
     SAFE_RELEASE(SwapChain);
     SAFE_RELEASE(DeviceContext);
     SAFE_RELEASE(Device);
 }
 
-global b32 SwapChainExists;
-global s32 RenderWidth;
-global s32 RenderHeight;
-static void SetupRender(void) {
+static void SetupSwapChain(void) {
     RECT client;
     ASSERT(GetClientRect(Window, &client));
     
     if (!(RenderWidth == client.right && RenderHeight == client.bottom)) {
         if (SwapChainExists) {
-            SAFE_RELEASE(FrameBufferView);
-            SAFE_RELEASE(DepthBufferView);
-            AppViewport = (D3D11_VIEWPORT) {0};
+            TeardownSwapChain();
         } else { /* Create the swap chain */
             /* TODO(lcf): eventually this should be parameterized. For now I'm just picking
                settings that work best on my machine. */
@@ -170,7 +242,7 @@ static void SetupRender(void) {
             /* TODO WARN(lcf): this should be wrapped in a feature macro */
             flags |= D3D11_CREATE_DEVICE_DEBUG;
 
-            D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
+            D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 };
             ID3D11Device* baseDevice;
             ID3D11DeviceContext* baseDeviceContext;
             D3D11CreateDevice(
@@ -218,7 +290,9 @@ static void SetupRender(void) {
             swapChainDesc.Stereo             = FALSE; /* enable 3d glasses */
             swapChainDesc.SampleDesc.Count   = 1;
             swapChainDesc.SampleDesc.Quality = 0;
-            swapChainDesc.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+            swapChainDesc.BufferUsage        = DXGI_USAGE_RENDER_TARGET_OUTPUT
+                /* NOTE(lcf): Add unordered access for uav. */
+                | DXGI_USAGE_UNORDERED_ACCESS; 
             swapChainDesc.BufferCount        = 2;
             swapChainDesc.Scaling            = DXGI_SCALING_STRETCH;
             swapChainDesc.SwapEffect         = DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -226,6 +300,7 @@ static void SetupRender(void) {
             swapChainDesc.Flags              = 0
                 | DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH
                 | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            
             dxgiFactory->lpVtbl->CreateSwapChainForHwnd(dxgiFactory, (IUnknown*) Device, Window, &swapChainDesc, 0, 0, &SwapChain);
             dxgiDevice->lpVtbl->Release(dxgiDevice);
             dxgiAdapter->lpVtbl->Release(dxgiAdapter);
@@ -235,6 +310,9 @@ static void SetupRender(void) {
         }
 
         SwapChain->lpVtbl->ResizeBuffers(SwapChain, 0, client.right, client.bottom, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+
+        RenderWidth = client.right;
+        RenderHeight = client.bottom;
         
         { /* Create Render Target */
             D3D11_TEXTURE2D_DESC DepthBufferDesc;
@@ -243,17 +321,25 @@ static void SetupRender(void) {
 
             SwapChain->lpVtbl->GetBuffer(SwapChain, 0, &IID_ID3D11Texture2D, &FrameBuffer);
             Device->lpVtbl->CreateRenderTargetView(Device, (ID3D11Resource*) FrameBuffer, 0, &FrameBufferView);
-
+            
             FrameBuffer->lpVtbl->GetDesc(FrameBuffer, &DepthBufferDesc);
             DepthBufferDesc.Format    = DXGI_FORMAT_D24_UNORM_S8_UINT;
             DepthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
             Device->lpVtbl->CreateTexture2D(Device, &DepthBufferDesc, 0, &DepthBuffer);
-            Device->lpVtbl->CreateDepthStencilView(Device, (ID3D11Resource*) DepthBuffer, 0, &DepthBufferView);
+            Device->lpVtbl->CreateDepthStencilView(Device, (ID3D11Resource*) DepthBuffer, 0, &DepthStencilView);
+            Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) FrameBuffer, 0, &FrameBufferUAV);
 
             AppViewport = (D3D11_VIEWPORT) { 0.0f, 0.0f, (f32) DepthBufferDesc.Width, (f32) DepthBufferDesc.Height, 0.0f, 1.0f };
 
-            FrameBuffer->lpVtbl->Release(FrameBuffer);
-            DepthBuffer->lpVtbl->Release(DepthBuffer);
+            SAFE_RELEASE(FrameBuffer);
+            SAFE_RELEASE(DepthBuffer);
         }
     }
+}
+
+static void TeardownSwapChain(void) {
+    SAFE_RELEASE(FrameBufferView);
+    SAFE_RELEASE(DepthStencilView);
+    SAFE_RELEASE(FrameBufferUAV);
+    AppViewport = (D3D11_VIEWPORT) {0};    
 }
