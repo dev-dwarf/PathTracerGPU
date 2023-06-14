@@ -22,7 +22,7 @@ typedef HMM_Vec3 vec3;
 #include <stdlib.h>
 #pragma comment(lib,"user32.lib")
 
-LPCWSTR CS_FILE = L"..\\src\\shader.hlsl";
+#define CS_FILE strc("..\\src\\shader.hlsl")
 #define CS_ENTRYPOINT "CSMain"
 #define CS_FEATURE_LEVEL "cs_5_0"
 #define CS_COMPILE_FLAGS (D3DCOMPILE_DEBUG | D3DCOMPILE_IEEE_STRICTNESS)
@@ -40,6 +40,9 @@ struct CS_Constants {
     u8 pad[4]; 
 };
 
+/* TODO: move to lcf; */
+global Arena *Scratch;
+
 global HWND Window;
 global ID3D11Device1 *Device;
 global ID3D11DeviceContext1 *DeviceContext;
@@ -55,8 +58,11 @@ global D3D11_VIEWPORT AppViewport;
 global b32 SwapChainExists;
 global s32 RenderWidth;
 global s32 RenderHeight;
-static void TeardownSwapChain(void);
-static void SetupSwapChain(void);
+internal void TeardownSwapChain(void);
+internal void SetupSwapChain(void);
+
+global ID3D11ComputeShader* Shader;
+internal void RecompileShader();
 
 global b32 Quit;
 
@@ -93,7 +99,7 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
     (void) hinstance, previnstance, cmdline, cmdshow;
 
     os_Init();
-    Arena *arena = Arena_create();
+    Scratch = Arena_create();
 
     /* Configuration */
     if (DoNotWaitForVsync) {
@@ -129,24 +135,9 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
 
     /* Setup Render Target */
     SetupSwapChain();
+    RecompileShader();
 
     /* Compile Shader and Set up needed buffers*/
-    ID3D11ComputeShader *Shader = 0;
-    {
-        ID3DBlob *csblob = 0;
-        ID3DBlob *errblob = 0;
-        HRESULT hr = D3DCompileFromFile(CS_FILE, 0, 0, CS_ENTRYPOINT, CS_FEATURE_LEVEL, 1 << 15, 0, &csblob, &errblob);
-        if (!SUCCEEDED(hr)) {
-            if (errblob) {
-                OutputDebugStringA((ch8*) errblob->lpVtbl->GetBufferPointer(errblob));
-            }
-        }
-        
-            HR(Device->lpVtbl->CreateComputeShader(Device, csblob->lpVtbl->GetBufferPointer(csblob), csblob->lpVtbl->GetBufferSize(csblob), 0, &Shader));
-        
-        SAFE_RELEASE(csblob);
-        SAFE_RELEASE(errblob);
-    }
     ID3D11Buffer *ConstantsBuffer;
     {
         D3D11_BUFFER_DESC constantsDesc = {
@@ -162,7 +153,7 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
 
     /* Message Loop */
     s64 startTime = os_GetTimeMicroseconds();
-    s64 flipTime = 0;
+    s64 flipTime = startTime;
     s64 lastFlipTime = 0;
     while (!Quit) {
         lastFlipTime = flipTime;
@@ -194,6 +185,7 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
 
         /* Rebuild SwapChain and Device if needed. */
         SetupSwapChain();
+        RecompileShader();
 
         /* Update Shader Constants */
         {
@@ -225,7 +217,30 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
     SAFE_RELEASE(Device);
 }
 
-static void SetupSwapChain(void) {
+internal void RecompileShader() {
+    internal u64 CSFileLastWriteTime = 0;
+    if (os_FileWasWritten(CS_FILE, &CSFileLastWriteTime)) {
+        ID3D11ComputeShader *newShader;
+        ID3DBlob *csblob = 0;
+        ID3DBlob *errblob = 0;
+        str shader = os_ReadFile(Scratch, CS_FILE);
+        HRESULT hr = D3DCompile(shader.str, shader.len, 0, 0, 0, CS_ENTRYPOINT, CS_FEATURE_LEVEL, 1 << 15, 0, &csblob, &errblob);
+        if (!SUCCEEDED(hr)) {
+            if (errblob) {
+                OutputDebugStringA((ch8*) errblob->lpVtbl->GetBufferPointer(errblob));
+            }
+        } else {
+            HR(Device->lpVtbl->CreateComputeShader(Device, csblob->lpVtbl->GetBufferPointer(csblob), csblob->lpVtbl->GetBufferSize(csblob), 0, &newShader));
+
+            SAFE_RELEASE(Shader);
+            Shader = newShader;
+        }        
+        SAFE_RELEASE(csblob);
+        SAFE_RELEASE(errblob);
+    }
+}
+
+internal void SetupSwapChain(void) {
     RECT client;
     ASSERT(GetClientRect(Window, &client));
     
@@ -266,7 +281,7 @@ static void SetupSwapChain(void) {
                used as an ID3D11Device1.
     
                However, what we actually want to get to is the IXDGIFactory2, which will allow us to
-               create a modern swap chain (double to use for rendering. So we go through several more layers
+               create a modern swap chain to use for rendering. So we go through several more layers
                of COM B.S. to get there.
             */
             baseDevice->lpVtbl->QueryInterface(baseDevice, &IID_ID3D11Device1, &Device);
@@ -337,7 +352,9 @@ static void SetupSwapChain(void) {
     }
 }
 
-static void TeardownSwapChain(void) {
+
+
+internal void TeardownSwapChain(void) {
     SAFE_RELEASE(FrameBufferView);
     SAFE_RELEASE(DepthStencilView);
     SAFE_RELEASE(FrameBufferUAV);
