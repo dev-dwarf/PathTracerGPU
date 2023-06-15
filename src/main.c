@@ -33,11 +33,10 @@ typedef HMM_Vec3 vec3;
 #define CS_DISPATCH_COUNT(x,n) ((x+n-1)/n)
 
 struct CS_Constants {
+    u32 iFrame;
     f32 iTime;
     f32 RenderWidth;
     f32 RenderHeight;
-    /* NOTE(lcf): sizeof() must be a multiple of 16 due to buffer config. */
-    u8 pad[4]; 
 };
 
 /* TODO: move to lcf; */
@@ -53,11 +52,13 @@ global DXGI_SWAP_CHAIN_DESC1 swapChainDesc;
 global ID3D11RenderTargetView *FrameBufferView;
 global ID3D11DepthStencilView *DepthStencilView;
 global ID3D11UnorderedAccessView *FrameBufferUAV;
+global ID3D11UnorderedAccessView *ComputeBufferUAV;
 global D3D11_VIEWPORT AppViewport;
 
 global b32 SwapChainExists;
 global s32 RenderWidth;
 global s32 RenderHeight;
+global s32 FrameCount;
 internal void TeardownSwapChain(void);
 internal void SetupSwapChain(void);
 
@@ -66,7 +67,8 @@ internal void RecompileShader();
 
 global b32 Quit;
 
-LRESULT WINAPI CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+LRESULT WINAPI CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
     /* TODO: handle window closed messages and such, close audio thread and do other needed
        cleanup things */
     LRESULT Result = 0;
@@ -95,7 +97,8 @@ LRESULT WINAPI CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 global u32 presentationFlags = 0;
-int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, int cmdshow) {
+int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, int cmdshow)
+{
     (void) hinstance, previnstance, cmdline, cmdshow;
 
     os_Init();
@@ -140,6 +143,8 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
     /* Compile Shader and Set up needed buffers*/
     ID3D11Buffer *ConstantsBuffer;
     {
+        /* NOTE(lcf): sizeof() must be a multiple of 16 due to buffer config. */
+        ASSERTSTATIC(sizeof(struct CS_Constants) % 16 == 0, constantsize16);
         D3D11_BUFFER_DESC constantsDesc = {
             sizeof(struct CS_Constants),
             D3D11_USAGE_DYNAMIC,
@@ -190,6 +195,7 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
         /* Update Shader Constants */
         {
             struct CS_Constants frameConstants;
+            frameConstants.iFrame = FrameCount++;
             frameConstants.iTime = (flipTime - startTime)  * 0.000001f;
             frameConstants.RenderWidth = (f32) RenderWidth;
             frameConstants.RenderHeight = (f32) RenderHeight;
@@ -201,23 +207,31 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
         }
         
         /* Rendering */
+        ID3D11UnorderedAccessView* UAVs[] = {FrameBufferUAV, ComputeBufferUAV};
         DeviceContext->lpVtbl->CSSetShader(DeviceContext, Shader, 0, 0);
-        DeviceContext->lpVtbl->CSSetUnorderedAccessViews(DeviceContext, 0, 1, &FrameBufferUAV, 0);
+        DeviceContext->lpVtbl->CSSetUnorderedAccessViews(DeviceContext, 0, 2, UAVs, 0);
         DeviceContext->lpVtbl->CSSetConstantBuffers(DeviceContext, 0, 1, &ConstantsBuffer);
         DeviceContext->lpVtbl->Dispatch(DeviceContext, CS_DISPATCH_COUNT(RenderWidth, CS_NUM_THREADS_W), CS_DISPATCH_COUNT(RenderHeight, CS_NUM_THREADS_H), 1);
         
         SwapChain->lpVtbl->Present(SwapChain, 0, presentationFlags);
     }
+
     
     /* Free Swap Chain */
     TeardownSwapChain();
     SAFE_RELEASE(Shader);
     SAFE_RELEASE(SwapChain);
     SAFE_RELEASE(DeviceContext);
+
+    ID3D11Debug *Debug;
+    Device->lpVtbl->QueryInterface(Device, &IID_ID3D11Debug, &Debug);
+    Debug->lpVtbl->ReportLiveDeviceObjects(Debug, 0x2);
     SAFE_RELEASE(Device);
+
 }
 
-internal void RecompileShader() {
+internal void RecompileShader()
+{
     internal u64 CSFileLastWriteTime = 0;
     if (os_FileWasWritten(CS_FILE, &CSFileLastWriteTime)) {
         ID3D11ComputeShader *newShader;
@@ -240,7 +254,8 @@ internal void RecompileShader() {
     }
 }
 
-internal void SetupSwapChain(void) {
+internal void SetupSwapChain(void)
+{
     RECT client;
     ASSERT(GetClientRect(Window, &client));
     
@@ -296,8 +311,7 @@ internal void SetupSwapChain(void) {
 
             /* Decrease frame latency and alt-enter fullscreen since it borks everything. */
             dxgiDevice->lpVtbl->SetMaximumFrameLatency(dxgiDevice, 1);
-            dxgiFactory->lpVtbl->MakeWindowAssociation(dxgiFactory, Window,
-                                               DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_PRINT_SCREEN);
+            dxgiFactory->lpVtbl->MakeWindowAssociation(dxgiFactory, Window, DXGI_MWA_NO_ALT_ENTER);
             
             swapChainDesc.Width              = client.right; /* use window width */
             swapChainDesc.Height             = client.bottom; /* use window height */
@@ -324,39 +338,60 @@ internal void SetupSwapChain(void) {
             SwapChainExists = true;
         }
 
-        SwapChain->lpVtbl->ResizeBuffers(SwapChain, 0, client.right, client.bottom, DXGI_FORMAT_UNKNOWN, DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
+        SwapChain->lpVtbl->ResizeBuffers(SwapChain, 0,
+                                         client.right, client.bottom,
+                                         DXGI_FORMAT_UNKNOWN,
+                                         DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH
+                                         | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING);
 
         RenderWidth = client.right;
         RenderHeight = client.bottom;
+        FrameCount = 0;
         
         { /* Create Render Target */
-            D3D11_TEXTURE2D_DESC DepthBufferDesc;
-            ID3D11Texture2D* FrameBuffer;
-            ID3D11Texture2D* DepthBuffer;
+            D3D11_TEXTURE2D_DESC depthBufferDesc;
+            ID3D11Texture2D *frameBuffer;
+            ID3D11Texture2D *depthBuffer;
 
-            SwapChain->lpVtbl->GetBuffer(SwapChain, 0, &IID_ID3D11Texture2D, &FrameBuffer);
-            Device->lpVtbl->CreateRenderTargetView(Device, (ID3D11Resource*) FrameBuffer, 0, &FrameBufferView);
+            SwapChain->lpVtbl->GetBuffer(SwapChain, 0, &IID_ID3D11Texture2D, &frameBuffer);
+            Device->lpVtbl->CreateRenderTargetView(Device, (ID3D11Resource*) frameBuffer, 0, &FrameBufferView);
+            /* Create UAV for frame buffer so compute shader can access it. */
+            Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) frameBuffer, 0, &FrameBufferUAV);
             
-            FrameBuffer->lpVtbl->GetDesc(FrameBuffer, &DepthBufferDesc);
-            DepthBufferDesc.Format    = DXGI_FORMAT_D24_UNORM_S8_UINT;
-            DepthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            Device->lpVtbl->CreateTexture2D(Device, &DepthBufferDesc, 0, &DepthBuffer);
-            Device->lpVtbl->CreateDepthStencilView(Device, (ID3D11Resource*) DepthBuffer, 0, &DepthStencilView);
-            Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) FrameBuffer, 0, &FrameBufferUAV);
+            frameBuffer->lpVtbl->GetDesc(frameBuffer, &depthBufferDesc);
+            depthBufferDesc.Format    = DXGI_FORMAT_D24_UNORM_S8_UINT;
+            depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+            Device->lpVtbl->CreateTexture2D(Device, &depthBufferDesc, 0, &depthBuffer);
+            Device->lpVtbl->CreateDepthStencilView(Device, (ID3D11Resource*) depthBuffer, 0, &DepthStencilView);
+            
 
-            AppViewport = (D3D11_VIEWPORT) { 0.0f, 0.0f, (f32) DepthBufferDesc.Width, (f32) DepthBufferDesc.Height, 0.0f, 1.0f };
+            AppViewport = (D3D11_VIEWPORT) { 0.0f, 0.0f, (f32) depthBufferDesc.Width, (f32) depthBufferDesc.Height, 0.0f, 1.0f };
 
-            SAFE_RELEASE(FrameBuffer);
-            SAFE_RELEASE(DepthBuffer);
+            SAFE_RELEASE(frameBuffer);
+            SAFE_RELEASE(depthBuffer);
+
+            /* Compute Shaders */
+
+            /* And an additional buffer of the same size to store compute data */
+            D3D11_TEXTURE2D_DESC computeBufferDesc = depthBufferDesc;
+            computeBufferDesc.Format    = DXGI_FORMAT_R32G32B32A32_FLOAT;
+            computeBufferDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+            ID3D11Texture2D *computeBuffer;
+            HR(Device->lpVtbl->CreateTexture2D(Device, &computeBufferDesc, 0, &computeBuffer));
+            HR(Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) computeBuffer, 0, &ComputeBufferUAV));
+
+            SAFE_RELEASE(computeBuffer);
+             
         }
     }
 }
 
-
-
-internal void TeardownSwapChain(void) {
+internal void TeardownSwapChain(void)
+{
     SAFE_RELEASE(FrameBufferView);
     SAFE_RELEASE(DepthStencilView);
     SAFE_RELEASE(FrameBufferUAV);
+    SAFE_RELEASE(ComputeBufferUAV);
     AppViewport = (D3D11_VIEWPORT) {0};    
 }
+
