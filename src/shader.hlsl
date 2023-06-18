@@ -24,12 +24,15 @@ struct Material {
     float3 specular;
     float3 emissive;
     float specularity;
-    float roughness;
+    float specularRoughness;
+    float3 refractive;
+    float refraction;
+    float refractionRoughness;
 };
 
 struct Hit {
     Ray normal;
-    bool back_face;
+    bool inside;
     float dist;
     Material mat;
 };
@@ -102,8 +105,8 @@ bool HitSphere(Sphere s, Ray r, out Hit h)
             h.normal.pos = RayAt(r, h.dist);
             h.normal.dir = (h.normal.pos - s.pos) / s.radius;
             h.mat = s.mat;
-            h.back_face = dot(r.dir, h.normal.dir) > 0;
-            if (h.back_face) {
+            h.inside = dot(r.dir, h.normal.dir) > 0;
+            if (h.inside) {
                 h.normal.dir = -h.normal.dir;
             }
         }
@@ -125,17 +128,19 @@ void HitScene(Ray ray, out Hit h)
     float3 k = float3(0.25, 0.25, 0.25);
     float3 o = float3(0.0, 0.0, 0.0);
     Sphere spheres[] = {
-        {float3( 1e3-2, 0, 0), 1e3, {k, w, o, 0.8, 0.1}}, // left
-        {float3(-1e3+2, 0, 0), 1e3, {k, w, o, 0.8, 0.1}}, // right
-        {float3(0, 0, 1e3-02), 1e3, {k, w, o, 0.8, 0.1}}, // front (behind camera)
-        {float3(0, 0,-1e3+05), 1e3, {k, w, o, 0.8, 0.1}}, // back
-        {float3(0, 1e3-01, 0), 1e3, {o, b, o, 0.5, 0.1}}, // bottom
-        {float3(0,-1e3+02, 0), 1e3, {k, w, r, 0.0, 0.1}}, // topt
-        {float3(-1, -0.25, 3.2), 0.33, {o, b, o, 0.2, 0.03}}, // light
-        {float3(1, 0.25, 3.2), 0.33, {w, g, o, 0.5, 0.6}},
+        {float3( 1e3-2, 0, 0), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // left
+        {float3(-1e3+2, 0, 0), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // right
+        {float3(0, 0, 1e3-02), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // front (behind camera)
+        {float3(0, 0,-1e3+05), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // back
+        {float3(0, 1e3-01, 0), 1e3, {o, b, o, 0.5, 0.1, o, 0, 0}}, // bottom
+        {float3(0,-1e3+02, 0), 1e3, {k, w, r, 0.0, 0.1, o, 0, 0}}, // topt
+        {float3(-1,-0.25, 2.2), 0.33, {o, b, o, 0.25, 0.03, o, 0.00, 0.0}},
+        {float3( 1,-0.25, 2.2), 0.33, {w, g, o, 0.50, 0.60, o, 0.00, 0.0}},
+        {float3( 0, 0.25, 2.0), 0.33, {o, o, o, 0.00, 0.00, r, 0.95, 0.1}},
+        {float3( 0, 0.25, 2.0),-0.25, {o, o, o, 0.00, 0.00, w, 1.00, 0.0}},
     };
 
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 10; i++) {
         if (HitSphere(spheres[i], ray, newh)) {
             if (newh.dist < h.dist) {
                 h = newh;
@@ -164,24 +169,41 @@ col RayColor(float2 uv, Ray r, inout uint rng)
             break;
         }
 
-        r.pos = h.normal.pos + h.normal.dir * 0.01;
 
+        if (h.inside) {
+            atten *= exp(h.mat.refractive * h.dist);
+        }
+
+        float roll = Random(rng);
+        bool doSpecular = roll < h.mat.specularity;
+        bool doRefract = !doSpecular && (roll < h.mat.specularity + h.mat.refraction);
+        r.pos = h.normal.pos + 0.0001*(doRefract? -h.normal.dir : h.normal.dir);
+        
         /* float3 diffuseDir = normalize(h.normal.dir+RandomUnit(rng)); */
         // alt: random in hemisphere
         float3 diffuseDir = RandomUnit(rng);
         if (dot(diffuseDir, h.normal.dir) < 0.0) {
             diffuseDir = -diffuseDir;
         }
-
-        bool doSpecular = Random(rng) < h.mat.specularity;
+               
         float3 specularDir = reflect(r.dir, h.normal.dir);
-        specularDir = normalize(lerp(specularDir, diffuseDir, h.mat.roughness*h.mat.roughness));
+        float IOF = 1.5;
+        float3 refractDir = refract(r.dir, h.normal.dir, h.inside? IOF : 1.0 / IOF);
+        if (!any(refractDir)) {
+            refractDir = specularDir;
+        }
+        specularDir = normalize(lerp(specularDir, diffuseDir, h.mat.specularRoughness*h.mat.specularRoughness));
+        refractDir = normalize(lerp(refractDir, -diffuseDir, h.mat.refractionRoughness*h.mat.refractionRoughness));
 
         ret += atten*h.mat.emissive;
 
         r.dir = doSpecular? specularDir : diffuseDir;
-        atten *= doSpecular? h.mat.specular : h.mat.albedo;
+        r.dir = doRefract? refractDir : r.dir;
 
+        if (!doRefract) {
+            atten *= doSpecular? h.mat.specular : h.mat.albedo;
+        }
+        
         /* r.dir = diffuseDir; */
         /* atten *= h.mat.albedo; */
 
@@ -196,10 +218,11 @@ col RayColor(float2 uv, Ray r, inout uint rng)
 
         /* Uncomment to visualize normals / reflection dirs */
         /* if (uv.x > 0) { */
-            /* ret = (h.normal.dir+1.0)*0.5; */
+        /* ret = (h.normal.dir+1.0)*0.5; */
         /* } else { */
-            /* ret = (r.dir+1.0)*0.5; */
+        /* ret = (r.dir+1.0)*0.5; */
         /* } */
+        /* ret = refractDir; */
         /* break; */
     }
 
@@ -281,15 +304,15 @@ void CSMain(uint3 threadId : SV_DispatchThreadID)
         }
     }
 
-    
-    if (doTrace || sv.x < 0.95) {
-        col base = compute[threadId.xy].rgb;
+    col base = compute[threadId.xy].rgb;
+    if ((doTrace || sv.x < 0.95) && any(base)) {
         const float exposure = 0.95;
         base *= exposure;
         base = ACESFilm(base);
         base = LinearToSRGB(base);
         backbuffer[threadId.xy] = float4(base, 1.0);
     } else {
-        backbuffer[threadId.xy] = float4(1, 0, 0, 1);
+        backbuffer[threadId.xy] = float4(1, 0, 0.35, 1);
     }
+
 } 
