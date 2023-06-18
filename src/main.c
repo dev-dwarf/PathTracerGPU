@@ -38,6 +38,9 @@ struct CS_Constants {
     f32 RenderWidth;
     f32 RenderHeight;
 };
+global HMM_Vec3 Pos;
+global HMM_Vec3 Look = {0.0, 0.0, 1.0};
+global HMM_Vec3 Up = {0.0, 1.0, 0.0};
 
 /* TODO: move to lcf; */
 global Arena *Scratch;
@@ -199,7 +202,7 @@ int WINAPI WinMain(HINSTANCE hinstance, HINSTANCE previnstance, LPSTR cmdline, i
             frameConstants.iTime = (flipTime - startTime)  * 0.000001f;
             frameConstants.RenderWidth = (f32) RenderWidth;
             frameConstants.RenderHeight = (f32) RenderHeight;
-
+            
             D3D11_MAPPED_SUBRESOURCE resource;	
             DeviceContext->lpVtbl->Map(DeviceContext, (ID3D11Resource*) ConstantsBuffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &resource);
             memcpy(resource.pData, &frameConstants, sizeof(frameConstants));
@@ -248,6 +251,7 @@ internal void RecompileShader()
 
             SAFE_RELEASE(Shader);
             Shader = newShader;
+            FrameCount = 0;
         }        
         SAFE_RELEASE(csblob);
         SAFE_RELEASE(errblob);
@@ -355,9 +359,7 @@ internal void SetupSwapChain(void)
 
             SwapChain->lpVtbl->GetBuffer(SwapChain, 0, &IID_ID3D11Texture2D, &frameBuffer);
             Device->lpVtbl->CreateRenderTargetView(Device, (ID3D11Resource*) frameBuffer, 0, &FrameBufferView);
-            /* Create UAV for frame buffer so compute shader can access it. */
-            Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) frameBuffer, 0, &FrameBufferUAV);
-            
+                        
             frameBuffer->lpVtbl->GetDesc(frameBuffer, &depthBufferDesc);
             depthBufferDesc.Format    = DXGI_FORMAT_D24_UNORM_S8_UINT;
             depthBufferDesc.BindFlags = D3D11_BIND_DEPTH_STENCIL;
@@ -367,10 +369,9 @@ internal void SetupSwapChain(void)
 
             AppViewport = (D3D11_VIEWPORT) { 0.0f, 0.0f, (f32) depthBufferDesc.Width, (f32) depthBufferDesc.Height, 0.0f, 1.0f };
 
-            SAFE_RELEASE(frameBuffer);
-            SAFE_RELEASE(depthBuffer);
-
             /* Compute Shaders */
+            /* Create UAV for frame buffer so compute shader can access it. */
+            Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) frameBuffer, 0, &FrameBufferUAV);
 
             /* And an additional buffer of the same size to store compute data */
             D3D11_TEXTURE2D_DESC computeBufferDesc = depthBufferDesc;
@@ -381,8 +382,11 @@ internal void SetupSwapChain(void)
             HR(Device->lpVtbl->CreateUnorderedAccessView(Device, (ID3D11Resource*) computeBuffer, 0, &ComputeBufferUAV));
 
             SAFE_RELEASE(computeBuffer);
-             
+            SAFE_RELEASE(frameBuffer);
+            SAFE_RELEASE(depthBuffer);
         }
+
+
     }
 }
 
