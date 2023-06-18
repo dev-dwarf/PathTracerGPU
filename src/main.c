@@ -5,19 +5,12 @@
 #include "lcf/lcf.h"
 #include "lcf/lcf.c"
 
-#include "stb/stb_image_write.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb/stb_image_write.h"
-
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #pragma comment(lib, "d3d11")
 #pragma comment(lib, "d3dcompiler")
 #pragma comment(lib, "dxgi")
 #pragma comment(lib, "dxguid")
-
-#include "HandmadeMath/HandmadeMath.h"
-typedef HMM_Vec3 vec3;
 
 #include <stdlib.h>
 #pragma comment(lib,"user32.lib")
@@ -38,9 +31,6 @@ struct CS_Constants {
     f32 RenderWidth;
     f32 RenderHeight;
 };
-global HMM_Vec3 Pos;
-global HMM_Vec3 Look = {0.0, 0.0, 1.0};
-global HMM_Vec3 Up = {0.0, 1.0, 0.0};
 
 /* TODO: move to lcf; */
 global Arena *Scratch;
