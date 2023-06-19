@@ -128,10 +128,10 @@ void HitScene(Ray ray, out Hit h)
     float3 k = float3(0.25, 0.25, 0.25);
     float3 o = float3(0.0, 0.0, 0.0);
     Sphere spheres[] = {
-        {float3( 1e3-2, 0, 0), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // left
-        {float3(-1e3+2, 0, 0), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // right
-        {float3(0, 0, 1e3-02), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // front (behind camera)
-        {float3(0, 0,-1e3+05), 1e3, {k, w, o, 0.8, 0.1, o, 0, 0}}, // back
+        {float3( 1e3-2, 0, 0), 1e3, {k, w, o, 1.0, 0.1, o, 0, 0}}, // left
+        {float3(-1e3+2, 0, 0), 1e3, {k, w, o, 1.0, 0.1, o, 0, 0}}, // right
+        {float3(0, 0, 1e3-02), 1e3, {k, w, o, 1.0, 0.1, o, 0, 0}}, // front (behind camera)
+        {float3(0, 0,-1e3+05), 1e3, {k, w, o, 1.0, 0.1, o, 0, 0}}, // back
         {float3(0, 1e3-01, 0), 1e3, {o, b, o, 0.5, 0.1, o, 0, 0}}, // bottom
         {float3(0,-1e3+02, 0), 1e3, {k, w, r, 0.0, 0.1, o, 0, 0}}, // topt
         {float3(-1,-0.25, 2.2), 0.33, {o, b, o, 0.25, 0.03, o, 0.00, 0.0}},
@@ -285,7 +285,7 @@ void CSMain(uint3 threadId : SV_DispatchThreadID)
 
     if (doTrace) {
         float3 colaccum = 0.0;
-        uint rng = threadId.x * 5051 + threadId.y * 1505 + iFrame * 90210;
+        uint rng = uint(uint(threadId.x) * uint(1973) * iTime + uint(threadId.y) * uint(9277) * uint(iFrame)) | uint(1);
         for (int i = 0; i < RAYS; i++) {
             float3 rand = RandomUnit(rng);
             float2 uv = sv + rand.xy/RenderDim.xy;
